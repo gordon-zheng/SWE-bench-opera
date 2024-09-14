@@ -4,6 +4,7 @@
 It sorts instances by length and continually writes the outputs to a specified file, so that the script can be stopped and restarted without losing progress.
 """
 
+import requests
 import json
 import os
 import time
@@ -42,6 +43,7 @@ MODEL_LIMITS = {
     "gpt-4-0613": 8_192,
     "gpt-4-1106-preview": 128_000,
     "gpt-4-0125-preview": 128_000,
+    "opera-beta1": 128_000,
 }
 
 # The cost per token for each model input.
@@ -61,6 +63,7 @@ MODEL_COST_PER_INPUT = {
     "gpt-4-32k": 0.00006,
     "gpt-4-1106-preview": 0.00001,
     "gpt-4-0125-preview": 0.00001,
+    "opera-beta1": 0.001,
 }
 
 # The cost per token for each model output.
@@ -80,6 +83,7 @@ MODEL_COST_PER_OUTPUT = {
     "gpt-4-32k": 0.00012,
     "gpt-4-1106-preview": 0.00003,
     "gpt-4-0125-preview": 0.00003,
+    "opera-beta1": 0.001,
 }
 
 # used for azure
@@ -87,7 +91,45 @@ ENGINES = {
     "gpt-3.5-turbo-16k-0613": "gpt-35-turbo-16k",
     "gpt-4-0613": "gpt-4",
     "gpt-4-32k-0613": "gpt-4-32k",
+    "opera-beta1": "opera-beta1",
 }
+
+def call_replit_endpoint(inputs):
+
+    system_messages = inputs.split("\n", 1)[0]
+    user_message = inputs.split("\n", 1)[1]
+    print("==================")
+    print(f"System message: {system_messages}")
+    print(f"User message: {user_message}")
+    print("++++++++++++++++++")
+
+    # Change the URL endpoint to the one we are using for the code parsing.
+    url = 'https://fdxagentitesterbackup-isaacwrubin.replit.app/generate_scene_from_prompt'
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    data = {
+        "prompt": user_message
+    }
+
+    try:
+        response = requests.post(url, json=data, headers=headers)
+        response.raise_for_status()  # Raise an error for bad status codes (e.g., 500)
+        resultJson = response.json()
+        print(f"Prompt success, response: {resultJson}")
+        result = resultJson["xml_content"] # TODO change the answer parsing code for the real endpoint
+        # TODO we are using only the user message and the ouptut token(result) for the bases of the
+        # cost calculation, which might under estimate the cost, but we can compensate by setting the
+        # cost of the Opera-beta1 model to much higher, to only run the opera model for a small amount
+        # of iterations
+        cost = calc_cost("opera-beta1", len(user_message), len(result))
+        return result, cost
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP error occurred while calling opera ai: {http_err}")  # Log the error
+        raise http_err
+    except Exception as err:
+        print(f"Other error occurred while calling opera ai: {err}")  # Log any other errors
+        raise err
 
 
 def calc_cost(model_name, input_tokens, output_tokens):
@@ -169,6 +211,60 @@ def claude_tokenize(string: str, api) -> int:
     """Returns the number of tokens in a text string."""
     num_tokens = api.count_tokens(string)
     return num_tokens
+
+
+def opera_inference(
+    test_dataset,
+    model_name_or_path,
+    output_file,
+    model_args,
+    existing_ids,
+    max_cost,
+):
+    """
+    Runs inference on a dataset using the opera API.
+
+    Args:
+    test_dataset (datasets.Dataset): The dataset to run inference on.
+    model_name_or_path (str): The name or path of the model to use.
+    output_file (str): The path to the output file.
+    model_args (dict): A dictionary of model arguments.
+    existing_ids (set): A set of ids that have already been processed.
+    max_cost (float): The maximum cost to spend on inference.
+    """
+    encoding = tiktoken.encoding_for_model("gpt-4-0125-preview")
+    # TODO assuming that the gpt4 tokenizer will work for opera-ai since it is using gpt 4
+    test_dataset = test_dataset.filter(
+        lambda x: gpt_tokenize(x["text"], encoding) <= MODEL_LIMITS[model_name_or_path],
+        desc="Filtering",
+        load_from_cache_file=False,
+    )
+    basic_args = {
+        "model_name_or_path": model_name_or_path,
+    }
+    total_cost = 0
+    print(f"Filtered to {len(test_dataset)} instances")
+    with open(output_file, "a+") as f:
+        for datum in tqdm(test_dataset, desc=f"Inference for {model_name_or_path}"):
+            instance_id = datum["instance_id"]
+            if instance_id in existing_ids:
+                continue
+            output_dict = {"instance_id": instance_id}
+            output_dict.update(basic_args)
+            output_dict["text"] = f"{datum['text']}\n\n"
+            response, cost = call_replit_endpoint(
+                output_dict["text"]
+            )
+            completion = response # assuming that the response is the body of the response content
+            total_cost += cost
+            print(f"Total Cost: {total_cost:.2f}")
+            output_dict["full_output"] = completion
+            output_dict["model_patch"] = extract_diff(completion)
+            print(json.dumps(output_dict), file=f, flush=True)
+            if max_cost is not None and total_cost >= max_cost:
+                print(f"Reached max cost {max_cost}, exiting")
+                break
+
 
 
 def openai_inference(
@@ -503,6 +599,8 @@ def main(
         anthropic_inference(**inference_args)
     elif model_name_or_path.startswith("gpt"):
         openai_inference(**inference_args)
+    elif model_name_or_path.startswith("opera"):
+        opera_inference(**inference_args)
     else:
         raise ValueError(f"Invalid model name or path {model_name_or_path}")
     logger.info(f"Done!")
