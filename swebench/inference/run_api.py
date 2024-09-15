@@ -43,7 +43,7 @@ MODEL_LIMITS = {
     "gpt-4-0613": 8_192,
     "gpt-4-1106-preview": 128_000,
     "gpt-4-0125-preview": 128_000,
-    "opera-beta1": 128_000,
+    "opera-beta1": 128_000, # we assume to have the same context token limit as gpt4-0125, adjust as necessary
 }
 
 # The cost per token for each model input.
@@ -63,7 +63,8 @@ MODEL_COST_PER_INPUT = {
     "gpt-4-32k": 0.00006,
     "gpt-4-1106-preview": 0.00001,
     "gpt-4-0125-preview": 0.00001,
-    "opera-beta1": 0.001,
+    "opera-beta1": 0.0001, # currently this weight is set to 10x of the gpt4--0125-preview weight in the assumption
+                          # that opera-ai agent is using 10x more token to compute the final result
 }
 
 # The cost per token for each model output.
@@ -83,7 +84,8 @@ MODEL_COST_PER_OUTPUT = {
     "gpt-4-32k": 0.00012,
     "gpt-4-1106-preview": 0.00003,
     "gpt-4-0125-preview": 0.00003,
-    "opera-beta1": 0.001,
+    "opera-beta1": 0.0003, # currently this weight is set to 10x of the gpt4--0125-preview weight in the assumption
+                        # that opera-ai agent is using 10x more token to compute the final result
 }
 
 # used for azure
@@ -91,11 +93,13 @@ ENGINES = {
     "gpt-3.5-turbo-16k-0613": "gpt-35-turbo-16k",
     "gpt-4-0613": "gpt-4",
     "gpt-4-32k-0613": "gpt-4-32k",
-    "opera-beta1": "opera-beta1",
+    "opera-beta1": "opera-beta1", # this shouldn't matter, but just keep it here just in case there are codes outside
+                                # run_api.py that need this key/value pair
 }
 
-def call_replit_endpoint(inputs):
 
+# this is the code that call our opera-ai to process the input prompt
+def call_replit_endpoint(inputs):
     system_messages = inputs.split("\n", 1)[0]
     user_message = inputs.split("\n", 1)[1]
     print("==================")
@@ -103,7 +107,7 @@ def call_replit_endpoint(inputs):
     print(f"User message: {user_message}")
     print("++++++++++++++++++")
 
-    # Change the URL endpoint to the one we are using for the code parsing.
+    # TODO Change the URL endpoint to the one we are using for the code parsing.
     url = 'https://fdxagentitesterbackup-isaacwrubin.replit.app/generate_scene_from_prompt'
     headers = {
         'Content-Type': 'application/json'
@@ -118,7 +122,7 @@ def call_replit_endpoint(inputs):
         resultJson = response.json()
         print(f"Prompt success, response: {resultJson}")
         result = resultJson["xml_content"] # TODO change the answer parsing code for the real endpoint
-        # TODO we are using only the user message and the ouptut token(result) for the bases of the
+        # TODO we are using only the user message and the output token(result) for the bases of the
         # cost calculation, which might under estimate the cost, but we can compensate by setting the
         # cost of the Opera-beta1 model to much higher, to only run the opera model for a small amount
         # of iterations
@@ -228,12 +232,12 @@ def opera_inference(
     test_dataset (datasets.Dataset): The dataset to run inference on.
     model_name_or_path (str): The name or path of the model to use.
     output_file (str): The path to the output file.
-    model_args (dict): A dictionary of model arguments.
+    model_args (dict): A dictionary of model arguments. currently not used.
     existing_ids (set): A set of ids that have already been processed.
     max_cost (float): The maximum cost to spend on inference.
     """
     encoding = tiktoken.encoding_for_model("gpt-4-0125-preview")
-    # TODO assuming that the gpt4 tokenizer will work for opera-ai since it is using gpt 4
+    # TODO we are assuming that the gpt4 tokenizer will work for opera-ai since it is using gpt 4
     test_dataset = test_dataset.filter(
         lambda x: gpt_tokenize(x["text"], encoding) <= MODEL_LIMITS[model_name_or_path],
         desc="Filtering",
