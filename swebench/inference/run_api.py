@@ -332,6 +332,9 @@ def openai_inference(
                 top_p,
             )
             completion = response.choices[0].message.content
+            print("CHATGPT response completion_tokens:")
+            print(json.dumps(completion))
+            print("########################################")
             total_cost += cost
             print(f"Total Cost: {total_cost:.2f}")
             output_dict["full_output"] = completion
@@ -496,6 +499,9 @@ def anthropic_inference(
                 output_dict["full_output"] = completion.content[0].text
             else:
                 output_dict["full_output"] = completion.completion
+            print("ANTHROPIC response:")
+            print(json.dumps(output_dict["full_output"]))
+            print("########################################")
             output_dict["model_patch"] = extract_diff(output_dict["full_output"])
             print(json.dumps(output_dict), file=f, flush=True)
             if max_cost is not None and total_cost >= max_cost:
