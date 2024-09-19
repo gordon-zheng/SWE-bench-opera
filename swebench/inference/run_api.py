@@ -26,6 +26,11 @@ from swebench.inference.make_datasets.utils import extract_diff
 from argparse import ArgumentParser
 import logging
 
+from colorama import Fore, Style, init
+
+init()
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 dotenv.load_dotenv()
@@ -36,9 +41,7 @@ MODEL_LIMITS = {
     "claude-3-opus-20240229": 200_000,
     "claude-3-sonnet-20240229": 200_000,
     "claude-3-haiku-20240307": 200_000,
-    "gpt-3.5-turbo-16k-0613": 16_385,
-    "gpt-3.5-turbo-0613": 4_097,
-    "gpt-3.5-turbo-1106": 16_385,
+    "gpt-4o-mini": 128_000,
     "gpt-4-32k-0613": 32_768,
     "gpt-4-0613": 8_192,
     "gpt-4-1106-preview": 128_000,
@@ -53,11 +56,7 @@ MODEL_COST_PER_INPUT = {
     "claude-3-opus-20240229": 0.000015,
     "claude-3-sonnet-20240229": 0.000003,
     "claude-3-haiku-20240307": 0.00000025,
-    "gpt-3.5-turbo-16k-0613": 0.0000015,
-    "gpt-3.5-turbo-0613": 0.0000015,
-    "gpt-3.5-turbo-1106": 0.000001,
-    "gpt-35-turbo-0613": 0.0000015,
-    "gpt-35-turbo": 0.0000015,  # probably still 0613
+    "gpt-4o-mini": 0.00000015,
     "gpt-4-0613": 0.00003,
     "gpt-4-32k-0613": 0.00006,
     "gpt-4-32k": 0.00006,
@@ -74,11 +73,7 @@ MODEL_COST_PER_OUTPUT = {
     "claude-3-opus-20240229": 0.000075,
     "claude-3-sonnet-20240229": 0.000015,
     "claude-3-haiku-20240307": 0.00000125,
-    "gpt-3.5-turbo-16k-0613": 0.000002,
-    "gpt-3.5-turbo-16k": 0.000002,
-    "gpt-3.5-turbo-1106": 0.000002,
-    "gpt-35-turbo-0613": 0.000002,
-    "gpt-35-turbo": 0.000002,
+    "gpt-4o-mini": 0.0000006,
     "gpt-4-0613": 0.00006,
     "gpt-4-32k-0613": 0.00012,
     "gpt-4-32k": 0.00012,
@@ -90,7 +85,7 @@ MODEL_COST_PER_OUTPUT = {
 
 # used for azure
 ENGINES = {
-    "gpt-3.5-turbo-16k-0613": "gpt-35-turbo-16k",
+    "gpt-4o-mini": "gpt-4o-mini",
     "gpt-4-0613": "gpt-4",
     "gpt-4-32k-0613": "gpt-4-32k",
     "opera-beta1": "opera-beta1", # this shouldn't matter, but just keep it here just in case there are codes outside
@@ -99,29 +94,33 @@ ENGINES = {
 
 
 # this is the code that call our opera-ai to process the input prompt
-def call_replit_endpoint(inputs):
+def call_replit_endpoint(inputs, run_tests=None):
     system_messages = inputs.split("\n", 1)[0]
     user_message = inputs.split("\n", 1)[1]
-    print("==================")
-    print(f"System message: {system_messages}")
-    print(f"User message: {user_message}")
-    print("++++++++++++++++++")
+    print(f"{Fore.BLUE}=================={Style.RESET_ALL}")
+    # print(f"System message: {system_messages}")
+    print(f"User message: {Fore.GREEN}{user_message}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}++++++++++++++++++{Style.RESET_ALL}")
+
+    if run_tests is None:
+        run_tests = False
 
     # TODO Change the URL endpoint to the one we are using for the code parsing.
-    url = 'https://fdxagentitesterbackup-isaacwrubin.replit.app/generate_scene_from_prompt'
+    url = 'https://swebenchchain-isaacwrubin.replit.app/process'
     headers = {
         'Content-Type': 'application/json'
     }
     data = {
-        "prompt": user_message
+        "user_messages": user_message,
+        "run_tests": run_tests,
     }
 
     try:
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()  # Raise an error for bad status codes (e.g., 500)
         resultJson = response.json()
-        print(f"Prompt success, response: {resultJson}")
-        result = resultJson["xml_content"] # TODO change the answer parsing code for the real endpoint
+        print(f"Prompt success, response: {Fore.YELLOW}{resultJson}{Style.RESET_ALL}")
+        result = resultJson["code"] # TODO change the answer parsing code for the real endpoint
         # TODO we are using only the user message and the output token(result) for the bases of the
         # cost calculation, which might under estimate the cost, but we can compensate by setting the
         # cost of the Opera-beta1 model to much higher, to only run the opera model for a small amount
@@ -146,6 +145,9 @@ def calc_cost(model_name, input_tokens, output_tokens):
     Returns:
     float: The cost of the response.
     """
+    if model_name == "gpt-4o-mini-2024-07-18":
+        model_name = "gpt-4o-mini" # seem there is a model name change from the chatgpt api response
+
     cost = (
         MODEL_COST_PER_INPUT[model_name] * input_tokens
         + MODEL_COST_PER_OUTPUT[model_name] * output_tokens
@@ -332,9 +334,6 @@ def openai_inference(
                 top_p,
             )
             completion = response.choices[0].message.content
-            print("CHATGPT response completion_tokens:")
-            print(json.dumps(completion))
-            print("########################################")
             total_cost += cost
             print(f"Total Cost: {total_cost:.2f}")
             output_dict["full_output"] = completion
@@ -499,9 +498,6 @@ def anthropic_inference(
                 output_dict["full_output"] = completion.content[0].text
             else:
                 output_dict["full_output"] = completion.completion
-            print("ANTHROPIC response:")
-            print(json.dumps(output_dict["full_output"]))
-            print("########################################")
             output_dict["model_patch"] = extract_diff(output_dict["full_output"])
             print(json.dumps(output_dict), file=f, flush=True)
             if max_cost is not None and total_cost >= max_cost:
