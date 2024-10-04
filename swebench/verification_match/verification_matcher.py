@@ -8,6 +8,7 @@ import shutil
 import base64
 from typing import List, Dict
 from flask import Flask, request, jsonify
+from extract_and_patch_test_file import process_log_file
 
 app = Flask(__name__)
 
@@ -37,9 +38,19 @@ def parse_arguments():
         help="The patch string to include in the model_patch field."
     )
     parser.add_argument(
+        "instance_id",
+        type=str,
+        help="The instance_id of the issue."
+    )
+    parser.add_argument(
         "clean_log",
         type=str,
         help="(TRUE or FALSE) to delete the verification logs after running the verify script."
+    )
+    parser.add_argument(
+        "get_unit_test",
+        type=str,
+        help="(TRUE or FALSE) to get the unit test that is generated for this issue."
     )
     return parser.parse_args()
 
@@ -64,6 +75,10 @@ def find_instance_id(file_name, issue, input_file_path="./complete_300_lite_inpu
     if not os.path.isfile(input_file_path):
         print(f"Error: Input file '{input_file_path}' does not exist.", file=sys.stderr)
         return matches
+    
+    # truncate the issue text to be 200 character or less:
+    if len(issue) > 200:
+        issue = issue[:200]
 
     with open(input_file_path, 'r', encoding='utf-8') as infile:
         for line_number, line in enumerate(infile, start=1):
@@ -87,7 +102,7 @@ def find_instance_id(file_name, issue, input_file_path="./complete_300_lite_inpu
 
     return matches
 
-def generate_output_json(instance_id, patch):
+def generate_output_json(instance_id, model_name, patch):
     """
     Constructs the desired JSON object.
 
@@ -100,7 +115,7 @@ def generate_output_json(instance_id, patch):
     """
     output_data = {
         "instance_id": instance_id,
-        "model_name_or_path": "opera-ai",
+        "model_name_or_path": model_name,
         "text": "",
         "full_output": "",
         "model_patch": patch
@@ -207,7 +222,7 @@ def run_verification():
         return error_msg
 
 
-def read_log_file(instance_id: str, file_name: str, file_extension: str) -> str:
+def read_log_file(instance_id: str, model_name: str, file_name: str, file_extension: str) -> str:
     """
     Constructs the path to the specified log file and attempts to read its contents.
 
@@ -226,7 +241,7 @@ def read_log_file(instance_id: str, file_name: str, file_extension: str) -> str:
         'logs', 
         'run_evaluation', 
         'verify_one', 
-        'opera-ai', 
+        model_name, 
         instance_id
     )
     # Combine the base path with the file name and extension
@@ -247,7 +262,7 @@ def read_log_file(instance_id: str, file_name: str, file_extension: str) -> str:
     return log_contents
 
 
-def generate_verification_json(instance_id, python_file, verification_stdout):
+def generate_verification_json(instance_id, model_name, python_file, verification_stdout):
     """
     Constructs the verification JSON object, including the run_instance_log.
 
@@ -260,22 +275,24 @@ def generate_verification_json(instance_id, python_file, verification_stdout):
         str: The JSON object as a string.
     """
     # retrieve the run_instance.log
-    run_instance_log = read_log_file(instance_id, "run_instance", ".log")
+    run_instance_log = read_log_file(instance_id, model_name, "run_instance", ".log")
     # retrieve the report.json
-    test_report_json = read_log_file(instance_id, "report", ".json")
+    test_report_json = read_log_file(instance_id, model_name, "report", ".json")
     # retrieve the test_output.txt
-    test_output_txt = read_log_file(instance_id, "test_output", ".txt")
+    test_output_txt = read_log_file(instance_id, model_name, "test_output", ".txt")
     # retrieve the eval.sh file
-    test_eval_sh = read_log_file(instance_id, "eval", ".sh")
+    test_eval_sh = read_log_file(instance_id, model_name, "eval", ".sh")
 
 
     # Determine fix_successful
+    fix_successful = "FALSE"
     if "Instances resolved: 1" in verification_stdout:
         fix_successful = "TRUE"
     else:
         fix_successful = "FALSE"
     
     # Determine patch_applied
+    patch_applied = "FALSE"
     if "'patch_successfully_applied': True" in run_instance_log:
         patch_applied = "TRUE"
     else:
@@ -410,13 +427,16 @@ def get_failed_test_files_with_content(json_str: str) -> Dict[str, List[Dict[str
     return result
 
 
-def verify_patch(file_name_b64, patch_b64, issue_b64, clean_log=True):
+def verify_patch(file_name_b64, patch_b64, issue_b64, clean_log=True, instance_id=None, get_unit_test=False):
     try:
         file_name = extract_based64_string(file_name_b64)
         patch = extract_based64_string(patch_b64)
-        issue = extract_based64_string(issue_b64)
-        
-        matching_instance_ids = find_instance_id(file_name, issue)
+
+        if not instance_id:
+            issue = extract_based64_string(issue_b64)
+            matching_instance_ids = find_instance_id(file_name, issue)
+        else:
+            matching_instance_ids = [instance_id]
     
         if not matching_instance_ids:
             error_msg = f"No instance_id found for python_file '{file_name}'."
@@ -430,7 +450,8 @@ def verify_patch(file_name_b64, patch_b64, issue_b64, clean_log=True):
             warning_msg = None
     
         # Use the first matching instance_id
-        output_json = generate_output_json(instance_id, patch)
+        model_name = "opera-ai" # TODO this need to getting from the patch file
+        output_json = generate_output_json(instance_id, model_name, patch)
         print(f"==== processing {instance_id}")
         write_to_file(json.dumps(output_json), "./verify_one_instance.jsonl")
         
@@ -438,16 +459,21 @@ def verify_patch(file_name_b64, patch_b64, issue_b64, clean_log=True):
         verification_stdout = run_verification()
         
         # Generate the verification JSON structure
-        verification_json = generate_verification_json(instance_id, file_name, verification_stdout)
-        # get the failed unit test file (not working currently)
-        # report_json = verification_json["test_report_json"]
+        verification_json = generate_verification_json(instance_id, model_name, file_name, verification_stdout)
         
-        # failed_test_files = get_failed_test_files_with_content(report_json)
+        # creat the unit test of the process instance
+        try:
+            unit_test_content = process_log_file(instance_id)
+        except Exception as e:
+            unit_test_content = f"{e}"
    
         response = {
             "run_api_jsonl": output_json,
             "verification_json": verification_json
         }
+        if get_unit_test:
+            response["unit_test"] = unit_test_content
+            
         if warning_msg:
             response["warning"] = warning_msg
             
@@ -474,17 +500,26 @@ def verify_patch_endpoint():
         patch_b64 = data.get('patch_64')
         issue_b64 = data.get('issue_64')
         clean_log = data.get('clean_log')
+        instance_id = data.get('instance_id')
+        get_unit_test = data.get('get_unit_test')
         if not clean_log:
             clean_log = True
         elif clean_log.upper() == "TRUE":
             clean_log = True
         elif clean_log.upper() == "FALSE":
             clean_log = False
-        
+
+        if not get_unit_test:
+            get_unit_test = False
+        elif get_unit_test.upper() == "TRUE":
+            get_unit_test = True
+        elif get_unit_test.upper() == "FALSE":
+            get_unit_test = False        
+
         if not file_name_b64 or not patch_b64:
             return jsonify({"error": "Both 'file_name' and 'patch' fields are required"}), 400
         
-        result, status_code = verify_patch(file_name_b64, patch_b64, issue_b64, clean_log)
+        result, status_code = verify_patch(file_name_b64, patch_b64, issue_b64, clean_log, instance_id, get_unit_test)
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 500
