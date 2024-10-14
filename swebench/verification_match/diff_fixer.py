@@ -152,10 +152,10 @@ def apply_fuzzy_matching_patch(original_file_name:str, diff_file_name:str):
                     if hunk_line_stripped != orig_line_stripped:
                         # the scenerio generally show up when the patching process break during "-" line, which lead to the mismatch
                         off_by_one = last_hunk_line_stripped == orig_line_stripped
-                        orig_file_line_num = best_match_start - line_difference + idx + 1 + (1 if off_by_one else 0)
-                        temp_error_msg = f"Hunk line {hunk_line_num} does not match original file line:\n"
-                        if not off_by_one: # if there is one line off mismatch, just show the diff line so error message is less confusing
-                            temp_error_msg += f"  Original line: '{orig_line.strip()}'\n" 
+                        orig_file_line_index = best_match_start + line_difference + idx + (1 if off_by_one else 0)
+                        temp_error_msg = f"Hunk line {hunk_line_num} does not match original file:\n"
+                        # if not off_by_one: # if there is one line off mismatch, just show the diff line so error message is less confusing
+                        temp_error_msg += f"  Orig line {orig_file_line_index + 1}: '{original_lines[orig_file_line_index].strip()}'\n" 
                         temp_error_msg += f"  Diff line {diff_file_line_num}: '{hunk_line.strip()}'\n"
                     last_hunk_line_stripped = hunk_line_stripped
                     last_orig_line_stripped = orig_line_stripped
