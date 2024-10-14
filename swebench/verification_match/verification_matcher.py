@@ -13,6 +13,7 @@ from flask import Flask, request, jsonify
 from extract_and_patch_test_file import process_log_file
 import importlib.util
 from pathlib import Path
+from diff_fixer import apply_fuzzy_matching_patch
 
 # Define module name and path
 module_name = 'diff_generator'
@@ -51,9 +52,9 @@ def parse_arguments():
         help="The name of the Python file to search for (e.g., example.py)."
     )
     parser.add_argument(
-        "new_file_64",
+        "diff_patch_64",
         type=str,
-        help="The updated python file that fixed the issue."
+        help="The diff patch file that the LLM generated."
     )
     parser.add_argument(
         "instance_id",
@@ -137,19 +138,18 @@ def generate_output_jsonl(instance_id, model_name, patch):
     }
     return output_data
 
-
-def write_to_file(json_string, output_file):
+def write_to_file(string_content, output_file):
     """
     Writes the JSON string to the specified output file.
 
     Args:
-        json_string (str): The JSON string to write.
+        string_content (str): The JSON string to write.
         output_file (str): The path to the output file.
     """
     try:
         with open(output_file, 'w', encoding='utf-8') as outfile:
-            outfile.write(json_string + '\n')
-        print(f"JSON object written to '{output_file}' (overwritten existing content).")
+            outfile.write(string_content + '\n')
+        print(f"Written file to '{output_file}' (overwritten existing content).")
     except Exception as e:
         print(f"Error writing to file '{output_file}': {e}", file=sys.stderr)
 
@@ -185,7 +185,7 @@ def clean_log_directory(instance_id):
         # sys.exit(1)
 
 
-def run_verification():
+def run_verification(verification_file_name):
     """
     Runs the verification script and captures its console output.
 
@@ -199,7 +199,7 @@ def run_verification():
         "--dataset_name",
         "princeton-nlp/SWE-bench_Lite",
         "--predictions_path",
-        "./verify_one_instance.jsonl",
+        f"{verification_file_name}",
         "--max_workers",
         "4",
         "--run_id",
@@ -237,7 +237,7 @@ def run_verification():
         return error_msg
 
 
-def read_log_file(instance_id: str, file_name: str, file_extension: str) -> str:
+def read_log_file(instance_id: str, file_name: str, file_extension: str):
     """
     Constructs the path to the specified log file and attempts to read its contents.
 
@@ -308,6 +308,7 @@ def generate_verification_json(instance_id, python_file, error_msg_segment):
         "error_msg_segment": error_msg_segment,
         "fix_successful": fix_successful,
     }
+    print(f"==== Result: {instance_id}, fix_successful: {fix_successful}")
     return verification_data
 
 
@@ -440,7 +441,7 @@ def get_old_code(instance_id_to_find, source_json_file="./complete_300_lite_inpu
                 instance_id = data.get('instance_id', '')
                 if instance_id == instance_id_to_find:
                     old_code = data.get('file_content', '')
-                    python_file = data.get('python_file', '')
+                    python_file_path = data.get('python_file', '')
                     break
             except json.JSONDecodeError as e:
                 print(f"Warning: Skipping invalid JSON on line {line_number}: {e}", file=sys.stderr)
@@ -452,7 +453,7 @@ def get_old_code(instance_id_to_find, source_json_file="./complete_300_lite_inpu
         print(error_text)
         raise NotFoundErr(error_text)
     
-    return old_code, python_file
+    return old_code, python_file_path
 
 
 def remove_line_number(code_text):
@@ -470,18 +471,18 @@ def extract_relevant_error(instance_id, verification_stdout):
             None if the fix was successful and no error message is needed.
     """
    
-    # check the content of those 2 file to try to isolate the error segment.
-    test_report_json, test_report_exist = read_log_file(instance_id, "report", ".json")
+    # check the content of those file to try to isolate the error segment.
     test_output_txt, test_output_exist = read_log_file(instance_id, "test_output", ".txt")
-    # the below 2 logs file isn't needed for now.
+    # the below 3 logs file isn't needed for now.
+    # test_report_json, test_report_exist = read_log_file(instance_id, "report", ".json")
     # run_instance_log, run_log_exist = read_log_file(instance_id, "run_instance", ".log")
     # test_eval_sh, test_eval_exist = read_log_file(instance_id, "eval", ".sh")
 
     error_log = ""
-    # if the test_output.txt doesn't exist, mean something horribilly bad happened.
+    # if the test_output.txt doesn't exist, mean something have gone wrong in the verification run (docker image build error, or patch error?)
     if not test_output_exist:
         # TODO: extract any error from stdout
-        print(f"verification_stdout: {verification_stdout}")
+        print(f"==== ERROR: no test_output.text exist for {instance_id}, here is the verification_stdout:\n{verification_stdout}")
         error_log = verification_stdout
     else:
         content_parts = re.split(r'Checking patch ', test_output_txt)
@@ -491,46 +492,58 @@ def extract_relevant_error(instance_id, verification_stdout):
 
     return error_log
 
-def verify_patch(instance_id, new_file_b64, get_unit_test=False):
+def verify_patch(instance_id, diff_patch_64, get_unit_test=False):
     try:
-        new_file_content = extract_based64_string(new_file_b64)
-        new_file_content = remove_line_number(new_file_content)
-        
         if not instance_id:
             error_msg = f"'instance_id' is required"
             return {"error": error_msg}, 400
         
+        print(f"==== processing {instance_id}")
+        temp_dir = "temp"
         # Always clean logs before processing the prompt
         clean_log_directory(instance_id)
+
+        diff_patch_content = extract_based64_string(diff_patch_64)
+        # remove the line number from the diff_patch_content if line number exists
+        diff_patch_content = remove_line_number(diff_patch_content)
+        # Write the diff_patch send by the caller to file system for debugging usage later 
+        user_input_file_path = os.path.join(temp_dir, f"{instance_id}_input.diff")
+        write_to_file(diff_patch_content, user_input_file_path)
     
         old_file_content, file_name = get_old_code(instance_id)
-        patch = create_patch(file_name, old_file_content.encode('utf-8'), new_file_content.encode('utf-8'))
+        # generate the new file content by fuzzy patching the old file
+        # write out old file content to system, so it can be process by fuzzy matching
+        old_file_path = os.path.join(temp_dir, f"{instance_id}_old.py")
+        with open(old_file_path, 'wb') as f:
+            f.write(old_file_content.encode("utf-8"))
+        print(f"Attempting to fuzzy patch")
+        new_file_content = apply_fuzzy_matching_patch(old_file_path, user_input_file_path)
+        patch = create_patch(file_name, old_file_content.encode('utf-8'), new_file_content.encode('utf-8'), instance_id)
 
         # Use the first matching instance_id
         output_jsonl = generate_output_jsonl(instance_id, model_name, patch)
-        print(f"==== processing {instance_id}")
-        write_to_file(json.dumps(output_jsonl), "./verify_one_instance.jsonl")
+        verification_file_name = os.path.join(temp_dir, f"{instance_id}_verify_one_instance.jsonl")
+        write_to_file(json.dumps(output_jsonl), verification_file_name)
         
         # Run verification and capture the output
-        verification_stdout = run_verification()
+        verification_stdout = run_verification(verification_file_name)
         
         # get the relevant error message from the different log files
         test_error_segment = extract_relevant_error(instance_id, verification_stdout)
 
         # Generate the verification JSON structure
         verification_json = generate_verification_json(instance_id, file_name, test_error_segment)
-        
-        # creat the unit test of the process instance
-        try:
-            unit_test_content = process_log_file(instance_id)
-        except Exception as e:
-            unit_test_content = f"{e}"
    
         response = {
             # "run_api_jsonl": output_jsonl, # for now don't include output_json, to make debugging easier
             "verification_json": verification_json
         }
-        if get_unit_test:
+        if get_unit_test:                    
+            # creat the unit test of the process instance
+            try:
+                unit_test_content = process_log_file(instance_id)
+            except Exception as e:
+                unit_test_content = f"{e}"
             response["unit_test"] = unit_test_content
         
         return response, 200
@@ -549,7 +562,7 @@ def verify_patch_endpoint():
             return jsonify({"error": "Invalid JSON payload"}), 400
         
         instance_id = data.get('instance_id')
-        new_file_b64 = data.get('new_file_64')
+        diff_patch_64 = data.get('diff_patch_64')
         get_unit_test = data.get('get_unit_test')
 
         if not get_unit_test:
@@ -559,13 +572,13 @@ def verify_patch_endpoint():
         elif get_unit_test.upper() == "FALSE":
             get_unit_test = False        
 
-        if not instance_id or not new_file_b64:
-            return jsonify({"error": "Both 'instance_id' and 'new_file_b64' fields are required"}), 400
+        if not instance_id or not diff_patch_64:
+            return jsonify({"error": "Both 'instance_id' and 'diff_patch_64' fields are required"}), 400
         
-        result, status_code = verify_patch(instance_id, new_file_b64, get_unit_test)
+        result, status_code = verify_patch(instance_id, diff_patch_64, get_unit_test)
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001)
+    app.run(host='0.0.0.0', port=5001, threaded=True)
