@@ -312,7 +312,7 @@ def generate_verification_json(instance_id, python_file, error_msg_segment, patc
         "patch_applied": patched_str,
         "fix_successful": fix_successful,
     }
-    print(f"==== Result: {instance_id}, fix_successful: {fix_successful}")
+    print(f"==== Result: {instance_id}, patch_applied: {patched_str}, fix_successful: {fix_successful}")
     return verification_data
 
 
