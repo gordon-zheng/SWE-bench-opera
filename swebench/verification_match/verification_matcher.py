@@ -281,7 +281,7 @@ def read_log_file(instance_id: str, file_name: str, file_extension: str):
     return log_contents, log_file_loaded
 
 
-def generate_verification_json(instance_id, python_file, error_msg_segment):
+def generate_verification_json(instance_id, python_file, error_msg_segment, patch_applied=True):
     """
     Constructs the verification JSON object, including the run_instance_log.
 
@@ -300,12 +300,16 @@ def generate_verification_json(instance_id, python_file, error_msg_segment):
     fix_successful = "FALSE"
     if "\"resolved\": true" in test_report_json:
         fix_successful = "TRUE"
+    patched_str = "TRUE"
+    if not patch_applied:
+        patched_str = "FALSE"
 
     # Construct the verification data
     verification_data = {
         "instance_id": instance_id,
         "python_file": python_file,
         "error_msg_segment": error_msg_segment,
+        "patch_applied": patched_str,
         "fix_successful": fix_successful,
     }
     print(f"==== Result: {instance_id}, fix_successful: {fix_successful}")
@@ -532,7 +536,7 @@ def verify_patch(instance_id, diff_patch_64, get_unit_test=False):
         test_error_segment = extract_relevant_error(instance_id, verification_stdout)
 
         # Generate the verification JSON structure
-        verification_json = generate_verification_json(instance_id, file_name, test_error_segment)
+        verification_json = generate_verification_json(instance_id, file_name, test_error_segment, True)
    
         response = {
             # "run_api_jsonl": output_jsonl, # for now don't include output_json, to make debugging easier
@@ -548,7 +552,9 @@ def verify_patch(instance_id, diff_patch_64, get_unit_test=False):
         
         return response, 200
     except ValueError as ve:
-        return {"error": str(ve)}, 400
+        return {
+            "verification_json": generate_verification_json(instance_id, file_name, str(ve), False)
+        }, 200
     except Exception as e:
         return {"error": str(e)}, 500
 
