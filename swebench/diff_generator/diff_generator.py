@@ -6,6 +6,40 @@ import re
 
 app = Flask(__name__)
 
+def process_list_or_str_input(input_param):
+    if isinstance(input_param, list):
+        if len(input_param) > 1:
+            return input_param
+        else:
+            # Treat the single element as content of a file
+            input_content = input_param[0]
+    elif isinstance(input_param, str):
+        input_content = input_param
+    else:
+        raise ValueError("Input must be a string or a list")
+
+    # Split the content into lines
+    return input_content.splitlines()
+
+
+def fix_patch_file_path(diff_lines, full_file_path):
+    # Strip leading slashes from full_file_path
+    normalized_file_path = re.sub(r'^(\./|/)+', '', full_file_path)
+    diff_lines = process_list_or_str_input(diff_lines)    
+
+    print(f"full_file_path {full_file_path}")
+    new_diff_lines = []
+    for line in diff_lines:
+        if line.startswith('--- '):
+            new_line = f'--- a/{normalized_file_path}'
+        elif line.startswith('+++ '):
+            new_line = f'+++ b/{normalized_file_path}'
+        else:
+            new_line = line
+        new_diff_lines.append(new_line)
+    return ''.join(s if s.endswith('\n') else s + '\n' for s in new_diff_lines)
+
+
 def create_patch(full_file_path, original_file, new_file, instance_id=None):
     # Create 'temp' directory if it doesn't exist
     temp_dir = 'temp'
@@ -25,8 +59,9 @@ def create_patch(full_file_path, original_file, new_file, instance_id=None):
         patch_file = os.path.join(temp_dir, f"{instance_id}_patch.diff")
 
     # Write out the original file
-    with open(old_file_path, 'wb') as f:
-        f.write(original_file)
+    if not os.path.exists(old_file_path):
+        with open(old_file_path, 'wb') as f:
+            f.write(original_file)
 
     # Write out the new file
     with open(new_file_path, 'wb') as f:
@@ -42,26 +77,15 @@ def create_patch(full_file_path, original_file, new_file, instance_id=None):
     with open(org_patch_file, 'r') as f:
         diff_lines = f.readlines()
     
-    # Strip leading slashes from full_file_path
-    normalized_file_path = re.sub(r'^(\./|/)+', '', full_file_path)
-    
-    new_diff_lines = []
-    for line in diff_lines:
-        if line.startswith('--- '):
-            new_line = f'--- a/{normalized_file_path}\n'
-        elif line.startswith('+++ '):
-            new_line = f'+++ b/{normalized_file_path}\n'
-        else:
-            new_line = line
-        new_diff_lines.append(new_line)
+    new_diff_lines = fix_patch_file_path(diff_lines, full_file_path)
 
     # Write the updated diff content to 'patch.diff'
     with open(patch_file, 'w') as f:
         f.writelines(new_diff_lines)
 
     # return the diff content in base64 encoding
-    diff_content = ''.join(new_diff_lines)
-    return diff_content
+    # diff_content = ''.join(new_diff_lines)
+    return new_diff_lines
 
 @app.route('/create_patch', methods=['POST'])
 def create_patch_endpoint():
